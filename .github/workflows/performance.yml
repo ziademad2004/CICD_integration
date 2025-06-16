@@ -1,0 +1,44 @@
+name: Performance Testing
+
+on:
+  push:
+    branches: [ main ]
+  schedule:
+    - cron: '0 2 * * 0'  # Weekly on Sunday at 2 AM
+  workflow_dispatch:
+
+jobs:
+  performance-test:
+    name: Performance Benchmarks
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Install Qt
+      uses: jurplel/install-qt-action@v3
+      with:
+        version: 6.5.2
+        
+    - name: Build with optimizations
+      run: |
+        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-O3 -march=native"
+        cmake --build build
+        
+    - name: Run performance tests
+      run: |
+        cd build
+        # Run AI performance benchmarks
+        echo "=== AI Performance Tests ===" > performance-report.txt
+        time ./test_aiopponent >> performance-report.txt 2>&1
+        
+        echo "=== Memory Usage Tests ===" >> performance-report.txt
+        valgrind --tool=massif --massif-out-file=massif.out ./ProfessionalTicTacToe --help
+        ms_print massif.out >> performance-report.txt
+        
+    - name: Upload performance report
+      uses: actions/upload-artifact@v4
+      with:
+        name: performance-report
+        path: build/performance-report.txt
