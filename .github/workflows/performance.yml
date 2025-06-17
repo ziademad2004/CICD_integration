@@ -16,29 +16,129 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
       
-    - name: Install Qt
-      uses: jurplel/install-qt-action@v3
-      with:
-        version: 6.5.2
+    - name: Install Qt and dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          qt6-base-dev \
+          libqt6test6 \
+          cmake \
+          build-essential \
+          xvfb \
+          valgrind \
+          time
         
     - name: Build with optimizations
       run: |
-        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-O3 -march=native"
+        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-O2 -g"
         cmake --build build
         
-    - name: Run performance tests
+    - name: Run performance tests safely
       run: |
         cd build
-        # Run AI performance benchmarks
-        echo "=== AI Performance Tests ===" > performance-report.txt
-        time ./test_aiopponent >> performance-report.txt 2>&1
+        echo "=== Performance Test Report ===" > performance-report.txt
+        echo "Date: $(date)" >> performance-report.txt
+        echo "Commit: ${{ github.sha }}" >> performance-report.txt
+        echo "" >> performance-report.txt
         
-        echo "=== Memory Usage Tests ===" >> performance-report.txt
-        valgrind --tool=massif --massif-out-file=massif.out ./ProfessionalTicTacToe --help
-        ms_print massif.out >> performance-report.txt
+        # Test each executable safely with timeout
+        for test_exe in test_gamelogic test_authentication test_user test_database test_aiopponent; do
+          if [ -f "./$test_exe" ]; then
+            echo "=== Testing $test_exe ===" >> performance-report.txt
+            
+            # Run with timeout and virtual display
+            timeout 60s xvfb-run -a env QT_QPA_PLATFORM=offscreen \
+              /usr/bin/time -v ./$test_exe >> performance-report.txt 2>&1 || \
+              echo "Test $test_exe failed or timed out" >> performance-report.txt
+            
+            echo "" >> performance-report.txt
+          else
+            echo "Executable $test_exe not found" >> performance-report.txt
+          fi
+        done
+        
+    - name: Run AI performance benchmark
+      run: |
+        cd build
+        echo "=== AI Performance Benchmark ===" >> performance-report.txt
+        
+        # Create a simple AI benchmark script
+        cat > ai_benchmark.cpp << 'EOF'
+        #include <iostream>
+        #include <chrono>
+        #include "../include/gamelogic.h"
+        #include "../include/aiopponent.h"
+        
+        int main() {
+            GameLogic game;
+            AIOpponent ai;
+            ai.setGameLogic(&game);
+            
+            auto start = std::chrono::high_resolution_clock::now();
+            
+            // Benchmark AI moves
+            for(int i = 0; i < 100; ++i) {
+                game.resetBoard();
+                while(game.getGameResult() == GameLogic::GameResult::InProgress) {
+                    ai.makeMove();
+                    if(game.getGameResult() != GameLogic::GameResult::InProgress) break;
+                    
+                    // Make a random move for the other player
+                    for(int j = 0; j < 9; ++j) {
+                        if(game.getCellState(j) == GameLogic::Player::None) {
+                            game.makeMove(j);
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+            
+            std::cout << "AI Benchmark: 100 games completed in " << duration.count() << "ms" << std::endl;
+            std::cout << "Average time per game: " << duration.count() / 100.0 << "ms" << std::endl;
+            
+            return 0;
+        }
+        EOF
+        
+        # Compile and run benchmark safely
+        if g++ -std=c++17 -I../include ai_benchmark.cpp -L. -lTicTacToeLib -lQt6Core -o ai_benchmark 2>/dev/null; then
+          timeout 30s ./ai_benchmark >> performance-report.txt 2>&1 || \
+            echo "AI benchmark failed or timed out" >> performance-report.txt
+        else
+          echo "Failed to compile AI benchmark" >> performance-report.txt
+        fi
+        
+    - name: Memory usage analysis
+      run: |
+        cd build
+        echo "=== Memory Usage Analysis ===" >> performance-report.txt
+        
+        # Run a simple memory test with valgrind (if test doesn't crash)
+        if timeout 30s xvfb-run -a env QT_QPA_PLATFORM=offscreen \
+           valgrind --tool=memcheck --leak-check=summary --show-leak-kinds=all \
+           ./test_gamelogic > /dev/null 2> valgrind_output.txt; then
+          echo "Memory analysis completed:" >> performance-report.txt
+          tail -20 valgrind_output.txt >> performance-report.txt
+        else
+          echo "Memory analysis failed or timed out" >> performance-report.txt
+        fi
         
     - name: Upload performance report
       uses: actions/upload-artifact@v4
+      if: always()
       with:
         name: performance-report
         path: build/performance-report.txt
+        
+    - name: Check for performance regressions
+      run: |
+        cd build
+        if grep -q "failed\|timed out\|Aborted\|Segmentation fault" performance-report.txt; then
+          echo "⚠️ Performance issues detected!"
+          exit 1
+        else
+          echo "✅ Performance tests completed successfully"
+        fi
